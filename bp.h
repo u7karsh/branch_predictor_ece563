@@ -23,6 +23,9 @@
 // Pointer translations
 typedef  struct  _bpT                 *bpPT;
 typedef  struct  _bpPathT             *bpPathPT;
+typedef  struct  _bpControllerT       *bpControllerPT;
+typedef  struct  _tagT                *tagPT;
+typedef  struct  _tagStoreT           *tagStorePT;
 
 // Enum to hold direction like read/write
 typedef enum {
@@ -34,7 +37,23 @@ typedef enum{
    BP_TYPE_BIMODAL                           = 0,
    BP_TYPE_GSHARE                            = 1,
    BP_TYPE_HYBRID                            = 2,
+   BP_TYPE_BTB                               = 3,
 }bpTypeT;
+
+typedef struct _bpControllerT{
+   bpTypeT               type;
+   bpPT                  bpBimodalP;
+   bpPT                  bpGshareP;
+   int                   k;
+   int                   kMask;
+   // Chooser table for hybrid predictor
+   int                   sizeChooserTable;
+   int                   *chooserTable;
+
+   // Metrics
+   int                   predictions;
+   int                   misPredictions;
+}bpControllerT;
 
 // Branch predictor structure.
 typedef struct _bpT{
@@ -44,60 +63,69 @@ typedef struct _bpT{
    // Placeholder for name
    char                  name[128];
 
+   tagStorePT            *tagStoreP;
+   //-------------------- BIMODAL/GSHARE BEGIN -------------------------
    // Number of bits used to represent prediction table
-   int                   mBimodal;
-   int                   mGshare;
+   int                   m;
 
    int                   n;
-   int                   k;
    bpTypeT               type;
    int                   gShareShift;
    int                   nMsbSetMask;
    // Mask to calculate index from address
-   int                   mBimodalMask;
-   int                   mGshareMask;
+   int                   mMask;
 
    int                   nMask;
-   int                   kMask;
 
-   int                   sizePredictionTableBimodal;
-   int                   sizePredictionTableGshare;
+   int                   sizePredictionTable;
 
-   int                   *predictionTableBimodal;
-   int                   *predictionTableGshare;
+   int                   *predictionTable;
 
-   // Chooser table for hybrid predictor
-   int                   sizeChooserTable;
-   int                   *chooserTable;
    // Register for GShare predictor
    int                   globalBrHistoryReg;
-
-   // Metrics
-   int                   predictions;
-   int                   misPredictions;
-
+   //-------------------- BIMODAL/GSHARE END ---------------------------
 }bpT;
+
+typedef struct _tagT{
+   int               tag;
+   boolean           valid;
+   boolean           dirty;
+   
+   int               counter;
+}tagT;
+
+// Tag store unit cell
+typedef struct _tagStoreT{
+   tagPT             *rowP;
+}tagStoreT;
 
 // Function prototypes. This part can be automated
 // lets keep hardcoded as of now
 bpPT  branchPredictorInit(   
       char*              name, 
-      int                mBimodal,
-      int                mGshare,
+      int                m,
       int                n,
-      int                k,
       bpTypeT            type
       );
-void bpProcess( bpPT bpP, int address, bpPathT actual );
-bpPathT bpPredict( bpPT bpP, int index, bpTypeT type );
-void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual, bpTypeT takenType );
-int bpGetChooserIndex( bpPT bpP, int address );
-bpTypeT bpHybridGetType( bpPT bpP, int index );
-int bpGetIndex( bpPT bpP, int address, bpTypeT type );
-void bpGetMetrics( bpPT bpP, int* predictions, int* misPredictions, double* misPredictionRate );
-void bpUpdateChooserTable( bpPT bpP, int chooserIndex, bpTypeT type, bpPathT pred1, bpPathT pred2, bpPathT actual );
+// bp funcs
+int bpGetIndex( bpPT bpP, int address );
+bpPathT bpPredict( bpPT bpP, int index );
+void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual );
+void bpUpdateGlobalBrHistoryTable( bpPT bpP, bpPathT actual );
+void bpPrintPredictionTable( bpPT bpP );
 
-void bpPrintPredictionTableBimodal( bpPT bpP );
-void bpPrintPredictionTableGshare( bpPT bpP );
-void bpPrintChooserTable( bpPT bpP );
+// Controller funcs
+bpControllerPT bpCreateController( bpPT bpBimodalP, bpPT bpGshareP, int k, bpTypeT type );
+void bpControllerProcess( bpControllerPT contP, int address, bpPathT actual );
+void bpControllerUpdateChooserTable( bpControllerPT contP, 
+                                     int chooserIndex, 
+                                     bpPathT bimodalPred, 
+                                     bpPathT gsharePred, 
+                                     bpPathT actual 
+                                   );
+int bpControllerGetChooserIndex( bpControllerPT contP, int address );
+bpTypeT bpControllerHybridGetType( bpControllerPT contP, int index );
+void bpControllerPrintChooserTable( bpControllerPT contP );
+void bpControllerGetMetrics( bpControllerPT contP, int* predictions, int* misPredictions, double* misPredictionRate );
+
 #endif

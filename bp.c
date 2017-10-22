@@ -40,132 +40,45 @@ int utilShiftAndMask( int input, int shiftValue, int mask )
 // Allocates and inits all internal variables
 bpPT  branchPredictorInit(   
       char*              name, 
-      int                mBimodal,
-      int                mGshare,
+      int                m,
       int                n,
-      int                k,
       bpTypeT            type
       )
 {
    // Calloc the mem to reset all vars to 0
    bpPT bpP                          = (bpPT) calloc( sizeof(bpT), 1 );
    if( type == BP_TYPE_GSHARE || type == BP_TYPE_HYBRID )
-      ASSERT( n > mGshare, "Illegal value of mGshare, n pair ( n !< mGshare )" );
+      ASSERT( n > m, "Illegal value of mGshare, n pair ( n !< mGshare )" );
 
    sprintf( bpP->name, "%s", name );
-   bpP->mBimodal                     = mBimodal;
-   bpP->mGshare                      = mGshare;
+   bpP->m                            = m;
    bpP->n                            = n;
    bpP->type                         = type;
-   bpP->gShareShift                  = mGshare - n;
+   bpP->gShareShift                  = m - n;
    // Lower 2 bits are reserved and not used in index
-   bpP->mGshareMask                  = utilCreateMask( mGshare, 0 );
-   bpP->mBimodalMask                 = utilCreateMask( mBimodal, 0 );
+   bpP->m                            = utilCreateMask( m, 0 );
 
-   bpP->kMask                        = utilCreateMask( k, 0 );
-   bpP->sizeChooserTable             = ( k > 0 ) ? pow(2, k) : 0;
-   bpP->chooserTable                 = (int*) calloc( sizeof(int), bpP->sizeChooserTable );
 
-   bpP->sizePredictionTableBimodal   = (mBimodal > 0) ? pow(2, mBimodal) : 0;
-   bpP->sizePredictionTableGshare    = (mGshare > 0)  ? pow(2, mGshare)  : 0;
+   bpP->sizePredictionTable          = (m > 0) ? pow(2, m) : 0;
 
    bpP->nMask                        = utilCreateMask( n, 0 );
    bpP->nMsbSetMask                  = 1 << (n - 1);
 
-   bpP->predictionTableBimodal       = (int*) calloc( sizeof(int), bpP->sizePredictionTableBimodal );
-   bpP->predictionTableGshare        = (int*) calloc( sizeof(int), bpP->sizePredictionTableGshare );
+   bpP->predictionTable              = (int*) calloc( sizeof(int), bpP->sizePredictionTable );
 
 
    // Initialize all to 2 (weakly taken)
-   for( int i = 0; i < bpP->sizePredictionTableBimodal; i++ ){
-      bpP->predictionTableBimodal[i] = 2;
+   for( int i = 0; i < bpP->sizePredictionTable; i++ ){
+      bpP->predictionTable[i]  = 2;
    }
-   for( int i = 0; i < bpP->sizePredictionTableGshare; i++ ){
-      bpP->predictionTableGshare[i]  = 2;
-   }
-
-   // Initialize all with 1
-   for( int i = 0; i < bpP->sizeChooserTable; i++ ){
-      bpP->chooserTable[i]           = 1;
-   }
-
    return bpP;
 }
 
-void bpProcess( bpPT bpP, int address, bpPathT actual )
+int bpGetIndex( bpPT bpP, int address )
 {
-   bpTypeT type                = bpP->type;
-   int chooserIndex;
-   // Variables to be used only for hybrid
-   int indexRemaining;
-   bpPathT predictedRemaining;
-
-   if( bpP->type == BP_TYPE_HYBRID ){
-      chooserIndex             = bpGetChooserIndex( bpP, address );
-      type                     = bpHybridGetType( bpP, chooserIndex );
-      // Predict the other part
-      bpTypeT typeRemaining    = (type == BP_TYPE_BIMODAL) ? BP_TYPE_GSHARE : BP_TYPE_BIMODAL;
-      indexRemaining           = bpGetIndex( bpP, address, typeRemaining );
-      predictedRemaining       = bpPredict( bpP, indexRemaining, typeRemaining );
-   }
-
-   int index                   = bpGetIndex( bpP, address, type );
-   bpPathT predicted           = bpPredict( bpP, index, type );
-
-   // Update the branch predictor based on the branch's actual outcome
-   bpUpdatePredictionTable( bpP, index, actual, type );
-
-   if( bpP->type == BP_TYPE_HYBRID ){
-      bpUpdateChooserTable( bpP, chooserIndex, type, predicted, predictedRemaining, actual );
-   }
-
-   bpP->predictions++;
-   // Update the miss predictions
-   bpP->misPredictions        += (actual != predicted);
-}
-
-void bpUpdateChooserTable( bpPT bpP, int chooserIndex, bpTypeT type, bpPathT pred1, bpPathT pred2, bpPathT actual )
-{
-   int increment = 0;
-   int counter   = bpP->chooserTable[chooserIndex];
-   // Both Correct or both incorrect
-   if( ( pred1 == actual && pred2 == actual ) ||
-       ( pred1 != actual && pred2 != actual ) ){
-      increment  = 0;
-   } else if( type == BP_TYPE_BIMODAL ){
-      increment  = (pred1 == actual) ? -1 : 1;
-   }
-   else{
-      increment  = (pred1 == actual) ? 1 : -1;
-   }
-
-   counter      += increment;
-
-   // Saturate
-   counter       = ( counter > 3 ) ? 3 : counter;
-   counter       = ( counter < 0 ) ? 0 : counter;
-
-   bpP->chooserTable[chooserIndex]  = counter;
-}
-
-inline int bpGetChooserIndex( bpPT bpP, int address )
-{
-   // Determine the branch's index k+1 to 2
-   int index = utilShiftAndMask( address, BP_LOWER_RSVD_CNT, bpP->kMask );
-   return index;
-}
-
-inline bpTypeT bpHybridGetType( bpPT bpP, int index )
-{
-   int counter = bpP->chooserTable[index];
-   return ( counter >= 2 ) ? BP_TYPE_GSHARE : BP_TYPE_BIMODAL;
-}
-
-int bpGetIndex( bpPT bpP, int address, bpTypeT type )
-{
-   int mask    = ( type == BP_TYPE_BIMODAL ) ? bpP->mBimodalMask : bpP->mGshareMask;
+   int mask    = bpP->m;
    int index   = utilShiftAndMask( address, BP_LOWER_RSVD_CNT, mask );
-   if( type == BP_TYPE_GSHARE ){
+   if( bpP->type == BP_TYPE_GSHARE ){
       ASSERT( bpP->n <= 0, "Illegal value of n(=%d) for type GSHARE", bpP->n );
       // GShare
       // the current n-bit global branch history reg is Xored with uppermost n bits of PC
@@ -174,66 +87,167 @@ int bpGetIndex( bpPT bpP, int address, bpTypeT type )
    return index & mask;
 }
 
-inline bpPathT bpPredict( bpPT bpP, int index, bpTypeT type )
+inline bpPathT bpPredict( bpPT bpP, int index )
 {
-   int predictionCounter       = (type == BP_TYPE_GSHARE) ? bpP->predictionTableGshare[index] : bpP->predictionTableBimodal[index];
+   int predictionCounter       = bpP->predictionTable[index];
+
    // If the counter value is greater than or equal to 2, predict taken, else not taken
    return ( predictionCounter >= 2 ) ? BP_PATH_TAKEN : BP_PATH_NOT_TAKEN;
 }
 
 // Counter is incremented if branch was taken, decremented if not taken
 // Counter saturates at [0, 3]
-void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual, bpTypeT takenType )
+void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual )
 {
-   int counter                 = ( takenType == BP_TYPE_GSHARE ) ? bpP->predictionTableGshare[index] : 
-                                                                   bpP->predictionTableBimodal[index];
+   int counter                 = bpP->predictionTable[index];
    counter                    += ( actual == BP_PATH_TAKEN ) ? 1 : -1;
 
    // Saturate                
    counter                     = ( counter > 3 ) ? 3 : counter;
    counter                     = ( counter < 0 ) ? 0 : counter;
    
-   if( takenType == BP_TYPE_GSHARE ){
-      bpP->predictionTableGshare[index] = counter;
+   bpP->predictionTable[index] = counter;
+}
+
+void bpUpdateGlobalBrHistoryTable( bpPT bpP, bpPathT actual )
+{
+   ASSERT( bpP->n <= 0, "Illegal value of n(=%d) for type GSHARE/HYBRID", bpP->n );
+   // Right shift by 1 and place the branch outcome to MSB of reg
+   bpP->globalBrHistoryReg   >>= 1;
+   if( actual == BP_PATH_TAKEN ){
+      bpP->globalBrHistoryReg |= bpP->nMsbSetMask;
+      bpP->globalBrHistoryReg &= bpP->nMask;
+   }
+}
+
+void bpPrintPredictionTable( bpPT bpP )
+{
+   for( int i = 0; i < bpP->sizePredictionTable; i++ ){
+      printf("%d %d\n", i, bpP->predictionTable[i]);
+   }
+}
+
+//------------------- CONTROLLER FUNCS ---------------------
+bpControllerPT bpCreateController( bpPT bpBimodalP, bpPT bpGshareP, int k, bpTypeT type )
+{
+   bpControllerPT contP       = (bpControllerPT) calloc( sizeof(bpControllerT), 1 );
+   contP->type                = type;
+   contP->bpBimodalP          = bpBimodalP;
+   contP->bpGshareP           = bpGshareP;
+
+   contP->kMask               = utilCreateMask( k, 0 );
+   contP->sizeChooserTable    = ( k > 0 ) ? pow(2, k) : 0;
+   contP->chooserTable        = (int*) calloc( sizeof(int), contP->sizeChooserTable );
+
+   // Initialize all with 1
+   for( int i = 0; i < contP->sizeChooserTable; i++ ){
+      contP->chooserTable[i]  = 1;
+   }
+   return contP;
+}
+
+void bpControllerProcess( bpControllerPT contP, int address, bpPathT actual )
+{
+   bpTypeT type                = contP->type;
+   bpPathT predicted;
+
+   // Predict based on predictor
+   if( type == BP_TYPE_BIMODAL ){
+      int index                = bpGetIndex( contP->bpBimodalP, address );
+      predicted                = bpPredict( contP->bpBimodalP, index );
+      bpUpdatePredictionTable( contP->bpBimodalP, index, actual );
+   } else if( type == BP_TYPE_GSHARE ){
+      int index                = bpGetIndex( contP->bpGshareP, address );
+      predicted                = bpPredict( contP->bpGshareP, index );
+      bpUpdatePredictionTable( contP->bpGshareP, index, actual );
+      bpUpdateGlobalBrHistoryTable( contP->bpGshareP, actual );
    } else{
-      bpP->predictionTableBimodal[index]  = counter;
-   }
+      // Hybrid
+      // Get predictions from both models
+      int bimodalIndex         = bpGetIndex( contP->bpBimodalP, address );
+      bpPathT bimodalPred      = bpPredict( contP->bpBimodalP, bimodalIndex );
 
-   if( bpP->type == BP_TYPE_GSHARE || bpP->type == BP_TYPE_HYBRID ){
-      ASSERT( bpP->n <= 0, "Illegal value of n(=%d) for type GSHARE/HYBRID", bpP->n );
-      // Right shift by 1 and place the branch outcome to MSB of reg
-      bpP->globalBrHistoryReg   >>= 1;
-      if( actual == BP_PATH_TAKEN ){
-         bpP->globalBrHistoryReg |= bpP->nMsbSetMask;
-         bpP->globalBrHistoryReg &= bpP->nMask;
+      int gshareIndex          = bpGetIndex( contP->bpGshareP, address );
+      bpPathT gsharePred       = bpPredict( contP->bpGshareP, gshareIndex );
+
+      // Do a lookup from chooser table
+      int chooserIndex         = bpControllerGetChooserIndex( contP, address );
+      bpTypeT selectedType     = bpControllerHybridGetType( contP, chooserIndex );
+
+      predicted                = ( selectedType == BP_TYPE_BIMODAL ) ? bimodalPred : gsharePred;
+
+      if( selectedType == BP_TYPE_BIMODAL ){
+         // Update bimodal
+         bpUpdatePredictionTable( contP->bpBimodalP, bimodalIndex, actual );
+      } else{
+         // Update Gshare
+         bpUpdatePredictionTable( contP->bpGshareP, gshareIndex, actual );
       }
+
+      // Global Br updates irrespective of decision
+      bpUpdateGlobalBrHistoryTable( contP->bpGshareP, actual );
+   
+      bpControllerUpdateChooserTable( contP, chooserIndex, bimodalPred, gsharePred, actual );
+   }
+
+   contP->predictions++;
+   // Update the miss predictions
+   contP->misPredictions        += (actual != predicted);
+}
+
+void bpControllerUpdateChooserTable( bpControllerPT contP, 
+                                     int chooserIndex, 
+                                     bpPathT bimodalPred, 
+                                     bpPathT gsharePred, 
+                                     bpPathT actual 
+                                   )
+{
+   int increment = 0;
+   int counter   = contP->chooserTable[chooserIndex];
+   // Both Correct or both incorrect
+   if( ( bimodalPred == actual && gsharePred == actual ) ||
+       ( bimodalPred != actual && gsharePred != actual ) ){
+      increment  = 0;
+   } else if( gsharePred == actual ){
+      increment  = 1;
+   }
+   else{
+      increment  = -1;
+   }
+
+   counter      += increment;
+
+   // Saturate
+   counter       = ( counter > 3 ) ? 3 : counter;
+   counter       = ( counter < 0 ) ? 0 : counter;
+
+   contP->chooserTable[chooserIndex]  = counter;
+}
+
+inline int bpControllerGetChooserIndex( bpControllerPT contP, int address )
+{
+   // Determine the branch's index k+1 to 2
+   int index = utilShiftAndMask( address, BP_LOWER_RSVD_CNT, contP->kMask );
+   return index;
+}
+
+inline bpTypeT bpControllerHybridGetType( bpControllerPT contP, int index )
+{
+   int counter = contP->chooserTable[index];
+   return ( counter >= 2 ) ? BP_TYPE_GSHARE : BP_TYPE_BIMODAL;
+}
+
+//----------------------------------------------------------------------
+void bpControllerPrintChooserTable( bpControllerPT contP )
+{
+   for( int i = 0; i < contP->sizeChooserTable; i++ ){
+      printf("%d %d\n", i, contP->chooserTable[i]);
    }
 }
 
-void bpPrintPredictionTableBimodal( bpPT bpP )
+void bpControllerGetMetrics( bpControllerPT contP, int* predictions, int* misPredictions, double* misPredictionRate )
 {
-   for( int i = 0; i < bpP->sizePredictionTableBimodal; i++ ){
-      printf("%d %d\n", i, bpP->predictionTableBimodal[i]);
-   }
-}
-
-void bpPrintPredictionTableGshare( bpPT bpP )
-{
-   for( int i = 0; i < bpP->sizePredictionTableGshare; i++ ){
-      printf("%d %d\n", i, bpP->predictionTableGshare[i]);
-   }
-}
-
-void bpPrintChooserTable( bpPT bpP )
-{
-   for( int i = 0; i < bpP->sizeChooserTable; i++ ){
-      printf("%d %d\n", i, bpP->chooserTable[i]);
-   }
-}
-
-void bpGetMetrics( bpPT bpP, int* predictions, int* misPredictions, double* misPredictionRate )
-{
-   *predictions       = bpP->predictions;
-   *misPredictions    = bpP->misPredictions;
-   *misPredictionRate = (double) ( bpP->misPredictions ) / (double) bpP->predictions;
+   *predictions       = contP->predictions;
+   *misPredictions    = contP->misPredictions;
+   *misPredictionRate = (double) ( contP->misPredictions ) / (double) contP->predictions;
 }

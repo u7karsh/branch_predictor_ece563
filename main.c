@@ -13,7 +13,7 @@
 #include "all.h"
 #include "bp.h"
 
-void doTrace( bpPT bpP, FILE* fp )
+void doTrace( bpControllerPT contP, FILE* fp )
 {
    char taken;
    int address;
@@ -26,31 +26,33 @@ void doTrace( bpPT bpP, FILE* fp )
       //printf("%d. PC: %x %c\n", count, address, taken);
       if( taken == 't' || taken == 'T' ){
          // Taken
-         bpProcess( bpP, address, BP_PATH_TAKEN );
+         bpControllerProcess( contP, address, BP_PATH_TAKEN );
       } else{
          // Not taken
-         bpProcess( bpP, address, BP_PATH_NOT_TAKEN );
+         bpControllerProcess( contP, address, BP_PATH_NOT_TAKEN );
       }
    } while( !feof(fp) );
 }
 
-void printStats( bpPT bpP )
+void printStats( bpControllerPT contP )
 {
    int pred, misPred;
    double misPredRate;
-   bpGetMetrics( bpP, &pred, &misPred, &misPredRate );
+   bpControllerGetMetrics( contP, &pred, &misPred, &misPredRate );
    printf("number of predictions: %d\n", pred);
    printf("number of mispredictions: %d\n", misPred);
    printf("misprediction rate: %0.2f%%\n", misPredRate * 100.0);
-   printf("FINAL CHOOSER CONTENTS\n");
-   bpPrintChooserTable( bpP );
-   if( bpP->type == BP_TYPE_GSHARE || bpP->type == BP_TYPE_HYBRID ){
-      printf("FINAL GSHARE CONTENTS\n");
-      bpPrintPredictionTableGshare( bpP );
+   if( contP->type == BP_TYPE_HYBRID ){
+      printf("FINAL CHOOSER CONTENTS\n");
+      bpControllerPrintChooserTable( contP );
    }
-   if( bpP->type == BP_TYPE_BIMODAL || bpP->type == BP_TYPE_HYBRID ){
+   if( contP->type == BP_TYPE_GSHARE || contP->type == BP_TYPE_HYBRID ){
+      printf("FINAL GSHARE CONTENTS\n");
+      bpPrintPredictionTable( contP->bpGshareP );
+   }
+   if( contP->type == BP_TYPE_BIMODAL || contP->type == BP_TYPE_HYBRID ){
       printf("FINAL BIMODAL CONTENTS\n");
-      bpPrintPredictionTableBimodal( bpP );
+      bpPrintPredictionTable( contP->bpBimodalP );
    }
 }
 
@@ -65,8 +67,10 @@ int main( int argc, char** argv )
 
    FILE* fp                = fopen( traceFile, "r" ); 
    ASSERT(!fp, "Unable to read file: %s\n", traceFile);
-   bpPT bpP                = branchPredictorInit( "bimodal", mBimodal, mGshare, n, k, BP_TYPE_HYBRID );
+   bpPT bpBimodalP         = branchPredictorInit( "bimodal", mBimodal, n, BP_TYPE_BIMODAL );
+   bpPT bpGshareP          = branchPredictorInit( "gshare" , mGshare , n, BP_TYPE_GSHARE  );
+   bpControllerPT contP    = bpCreateController( bpBimodalP, bpGshareP, k, BP_TYPE_HYBRID );
 
-   doTrace( bpP, fp );
-   printStats( bpP );
+   doTrace( contP, fp );
+   printStats( contP );
 }
