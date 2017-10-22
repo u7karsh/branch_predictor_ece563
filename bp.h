@@ -69,6 +69,9 @@ typedef struct _bpT{
    int                   btbIndexMask;
    int                   btbAssoc;
    int                   btbSets;
+   int                   btbPredictions;
+   int                   btbMissTaken;
+
    tagStorePT            *tagStoreP;
    //-------------------- BIMODAL/GSHARE BEGIN -------------------------
    // Number of bits used to represent prediction table
@@ -119,10 +122,11 @@ void bpGetIndexTag( bpPT bpP, int address, int* indexBpP, int* indexBtbP, int* t
 void bpBtbHitUpdateLRU( bpPT bpP, int index, int setIndex );
 int bpBtbFindReplacementUpdateCounterLRU( bpPT bpP, int index, int tag, int overrideSetIndex, int doOverride );
 bpPathT bpPredict( bpPT bpP, int indexBp, int indexBtb, int tag, boolean *update );
-void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual );
+void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual, boolean btbMiss );
 void bpUpdateGlobalBrHistoryTable( bpPT bpP, bpPathT actual );
 void bpPrintPredictionTable( bpPT bpP );
 void bpBtbPrintContents( bpPT bpP );
+void bpBtbGetMetrics( bpPT bpP, int* pred, int* misPred );
 
 // Controller funcs
 bpControllerPT bpCreateController( bpPT bpBimodalP, bpPT bpGshareP, int k, bpTypeT type );

@@ -47,6 +47,8 @@ bpPT  branchPredictorInit(
       int                btbAssoc
       )
 {
+   if( m == 0 ) return NULL;
+
    // Calloc the mem to reset all vars to 0
    bpPT bpP                          = (bpPT) calloc( 1, sizeof(bpT) );
    if( type == BP_TYPE_GSHARE || type == BP_TYPE_HYBRID )
@@ -74,7 +76,7 @@ bpPT  branchPredictorInit(
    }
 
    // BTB
-   bpP->btbPresent                   = TRUE;
+   bpP->btbPresent                   = (btbSize > 0) ? TRUE : FALSE;
    bpP->btbSize                      = btbSize;
    bpP->btbAssoc                     = btbAssoc;
    bpP->btbSets                      = ceil( (double) btbSize / (double) (btbAssoc * 4) );
@@ -162,7 +164,6 @@ bpPathT bpPredict( bpPT bpP, int indexBp, int indexBtb, int tag, boolean *update
       for( int assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex++ ){
          if( rowP[assocIndex]->valid == 1 && rowP[assocIndex]->tag == tag ){
             hit       = TRUE;
-            //printf("BTB HIT\n");
             bpBtbHitUpdateLRU( bpP, indexBtb, assocIndex );
             break;
          }
@@ -197,17 +198,21 @@ bpPathT bpPredict( bpPT bpP, int indexBp, int indexBtb, int tag, boolean *update
 
 // Counter is incremented if branch was taken, decremented if not taken
 // Counter saturates at [0, 3]
-void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual )
+void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual, boolean btbMiss )
 {
+   if( btbMiss ){
+      bpP->btbPredictions++;
+      bpP->btbMissTaken       += ( actual == BP_PATH_TAKEN ) ? 1 : 0;
+      return;
+   }
+
    int counter                 = bpP->predictionTable[index];
-   //printf("GSHARE index: %d old value: %d", index, counter);
    counter                    += ( actual == BP_PATH_TAKEN ) ? 1 : -1;
 
    // Saturate                
    counter                     = ( counter > 3 ) ? 3 : counter;
    counter                     = ( counter < 0 ) ? 0 : counter;
    
-   //printf(" new value %d\n", counter);
    bpP->predictionTable[index] = counter;
 }
 
@@ -232,16 +237,24 @@ void bpPrintPredictionTable( bpPT bpP )
 void bpBtbPrintContents( bpPT bpP )
 {
    if( !bpP ) return;
+   if( !bpP->btbPresent ) return;
+
    for( int setIndex = 0; setIndex < bpP->btbSets; setIndex++ ){
-      printf("set\t\t%d:\t\t", setIndex);
+      printf("set %d\t:\t\t", setIndex);
       tagPT *rowP = bpP->tagStoreP[setIndex]->rowP;
       for( int assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex++ ){
          printf("%x\t", rowP[assocIndex]->tag);
       }
       printf("\n");
    }
+   printf("\n");
 }
 
+void bpBtbGetMetrics( bpPT bpP, int* pred, int* misPred )
+{
+   *pred                      = bpP->btbPredictions;
+   *misPred                   = bpP->btbMissTaken;
+}
 
 //------------------- CONTROLLER FUNCS ---------------------
 bpControllerPT bpCreateController( bpPT bpBimodalP, bpPT bpGshareP, int k, bpTypeT type )
@@ -273,15 +286,14 @@ void bpControllerProcess( bpControllerPT contP, int address, bpPathT actual )
       boolean update;
       bpGetIndexTag( contP->bpBimodalP, address, &indexBp, &indexBtb, &tag );
       predicted                = bpPredict( contP->bpBimodalP, indexBp, indexBtb, tag, &update );
-      if( update )
-         bpUpdatePredictionTable( contP->bpBimodalP, indexBp, actual );
+      bpUpdatePredictionTable( contP->bpBimodalP, indexBp, actual, !update );
    } else if( type == BP_TYPE_GSHARE ){
       int indexBp, indexBtb, tag; 
       boolean update;
       bpGetIndexTag( contP->bpGshareP, address, &indexBp, &indexBtb, &tag );
       predicted                = bpPredict( contP->bpGshareP, indexBp, indexBtb, tag, &update );
+      bpUpdatePredictionTable( contP->bpGshareP, indexBp, actual, !update );
       if( update ){
-         bpUpdatePredictionTable( contP->bpGshareP, indexBp, actual );
          bpUpdateGlobalBrHistoryTable( contP->bpGshareP, actual );
       }
    } else{
@@ -305,12 +317,10 @@ void bpControllerProcess( bpControllerPT contP, int address, bpPathT actual )
 
       if( selectedType == BP_TYPE_BIMODAL ){
          // Update bimodal
-         if( updateBimodal )
-            bpUpdatePredictionTable( contP->bpBimodalP, bimodalIndexBp, actual );
+         bpUpdatePredictionTable( contP->bpBimodalP, bimodalIndexBp, actual, !updateBimodal );
       } else{
          // Update Gshare
-         if( updateGshare )
-            bpUpdatePredictionTable( contP->bpGshareP, gshareIndexBp, actual );
+         bpUpdatePredictionTable( contP->bpGshareP, gshareIndexBp, actual, !updateGshare );
       }
 
       // Global Br updates irrespective of decision
