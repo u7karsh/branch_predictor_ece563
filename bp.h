@@ -63,6 +63,12 @@ typedef struct _bpT{
    // Placeholder for name
    char                  name[128];
 
+   boolean               btbPresent;
+   int                   btbSize;
+   int                   btbIndexSize;
+   int                   btbIndexMask;
+   int                   btbAssoc;
+   int                   btbSets;
    tagStorePT            *tagStoreP;
    //-------------------- BIMODAL/GSHARE BEGIN -------------------------
    // Number of bits used to represent prediction table
@@ -89,7 +95,6 @@ typedef struct _bpT{
 typedef struct _tagT{
    int               tag;
    boolean           valid;
-   boolean           dirty;
    
    int               counter;
 }tagT;
@@ -105,14 +110,19 @@ bpPT  branchPredictorInit(
       char*              name, 
       int                m,
       int                n,
-      bpTypeT            type
+      bpTypeT            type,
+      int                btbSize,
+      int                btbAssoc
       );
 // bp funcs
-int bpGetIndex( bpPT bpP, int address );
-bpPathT bpPredict( bpPT bpP, int index );
+void bpGetIndexTag( bpPT bpP, int address, int* indexBpP, int* indexBtbP, int* tagP );
+void bpBtbHitUpdateLRU( bpPT bpP, int index, int setIndex );
+int bpBtbFindReplacementUpdateCounterLRU( bpPT bpP, int index, int tag, int overrideSetIndex, int doOverride );
+bpPathT bpPredict( bpPT bpP, int indexBp, int indexBtb, int tag, boolean *update );
 void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual );
 void bpUpdateGlobalBrHistoryTable( bpPT bpP, bpPathT actual );
 void bpPrintPredictionTable( bpPT bpP );
+void bpBtbPrintContents( bpPT bpP );
 
 // Controller funcs
 bpControllerPT bpCreateController( bpPT bpBimodalP, bpPT bpGshareP, int k, bpTypeT type );

@@ -42,11 +42,13 @@ bpPT  branchPredictorInit(
       char*              name, 
       int                m,
       int                n,
-      bpTypeT            type
+      bpTypeT            type,
+      int                btbSize,
+      int                btbAssoc
       )
 {
    // Calloc the mem to reset all vars to 0
-   bpPT bpP                          = (bpPT) calloc( sizeof(bpT), 1 );
+   bpPT bpP                          = (bpPT) calloc( 1, sizeof(bpT) );
    if( type == BP_TYPE_GSHARE || type == BP_TYPE_HYBRID )
       ASSERT( n > m, "Illegal value of mGshare, n pair ( n !< mGshare )" );
 
@@ -56,7 +58,7 @@ bpPT  branchPredictorInit(
    bpP->type                         = type;
    bpP->gShareShift                  = m - n;
    // Lower 2 bits are reserved and not used in index
-   bpP->m                            = utilCreateMask( m, 0 );
+   bpP->mMask                        = utilCreateMask( m, 0 );
 
 
    bpP->sizePredictionTable          = (m > 0) ? pow(2, m) : 0;
@@ -64,32 +66,130 @@ bpPT  branchPredictorInit(
    bpP->nMask                        = utilCreateMask( n, 0 );
    bpP->nMsbSetMask                  = 1 << (n - 1);
 
-   bpP->predictionTable              = (int*) calloc( sizeof(int), bpP->sizePredictionTable );
-
+   bpP->predictionTable              = (int*) calloc( bpP->sizePredictionTable, sizeof(int) );
 
    // Initialize all to 2 (weakly taken)
    for( int i = 0; i < bpP->sizePredictionTable; i++ ){
       bpP->predictionTable[i]  = 2;
    }
+
+   // BTB
+   bpP->btbPresent                   = TRUE;
+   bpP->btbSize                      = btbSize;
+   bpP->btbAssoc                     = btbAssoc;
+   bpP->btbSets                      = ceil( (double) btbSize / (double) (btbAssoc * 4) );
+   bpP->btbIndexSize                 = CLOG2( bpP->btbSets );
+   bpP->btbIndexMask                 = utilCreateMask( bpP->btbIndexSize, 0 );
+   bpP->tagStoreP                    = (tagStorePT*) calloc(bpP->btbSets, sizeof(tagStorePT));
+   for( int index = 0; index < bpP->btbSets; index++ ){
+       bpP->tagStoreP[index]         = (tagStorePT) calloc(1, sizeof(tagStoreT));
+       bpP->tagStoreP[index]->rowP   = (tagPT*) calloc(bpP->btbAssoc, sizeof(tagPT));
+       for( int setIndex = 0; setIndex < bpP->btbAssoc; setIndex++ ){
+          bpP->tagStoreP[index]->rowP[setIndex] = (tagPT)  calloc(1, sizeof(tagT));
+
+          // Update the counter values to comply with LRU defaults
+          bpP->tagStoreP[index]->rowP[setIndex]->counter = setIndex;
+       }
+   }
+
    return bpP;
 }
 
-int bpGetIndex( bpPT bpP, int address )
+void bpGetIndexTag( bpPT bpP, int address, int* indexBpP, int* indexBtbP, int* tagP )
 {
-   int mask    = bpP->m;
-   int index   = utilShiftAndMask( address, BP_LOWER_RSVD_CNT, mask );
+   int mask    = bpP->mMask;
+   int indexBp = utilShiftAndMask( address, BP_LOWER_RSVD_CNT, mask );
    if( bpP->type == BP_TYPE_GSHARE ){
       ASSERT( bpP->n <= 0, "Illegal value of n(=%d) for type GSHARE", bpP->n );
       // GShare
       // the current n-bit global branch history reg is Xored with uppermost n bits of PC
-      index    = ( bpP->globalBrHistoryReg << bpP->gShareShift ) ^ index;
+      indexBp  = ( bpP->globalBrHistoryReg << bpP->gShareShift ) ^ indexBp;
    }
-   return index & mask;
+   *indexBpP   = indexBp & mask;
+   *indexBtbP  = utilShiftAndMask( address, BP_LOWER_RSVD_CNT, bpP->btbIndexMask );
+   *tagP       = address >> (bpP->btbIndexSize + 2);
 }
 
-inline bpPathT bpPredict( bpPT bpP, int index )
+void bpBtbHitUpdateLRU( bpPT bpP, int index, int setIndex )
 {
-   int predictionCounter       = bpP->predictionTable[index];
+   tagPT     *rowP = bpP->tagStoreP[index]->rowP;
+
+   // Increment the counter of other blocks whose counters are less
+   // than the referenced block's old counter value
+   for( int assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex++ ){
+      if( rowP[assocIndex]->counter < rowP[setIndex]->counter )
+         rowP[assocIndex]->counter++;
+   }
+
+   // Set the referenced block's counter to 0 (Most recently used)
+   rowP[setIndex]->counter = 0;
+}
+
+int bpBtbFindReplacementUpdateCounterLRU( bpPT bpP, int index, int tag, int overrideSetIndex, int doOverride )
+{
+   tagPT   *rowP = bpP->tagStoreP[index]->rowP;
+   int replIndex = 0;
+
+   // Place data at max counter value and reset counter to 0
+   // Increment all counters
+   if( doOverride ){
+      // Update the counter values just as if it was a hit for this index
+      bpBtbHitUpdateLRU( bpP, index, overrideSetIndex );
+      replIndex  = overrideSetIndex;
+
+   } else{
+      // Speedup: do a increment % assoc to all elements and update tag
+      // for value 0
+      for( int assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex ++ ){
+         rowP[assocIndex]->counter   = (rowP[assocIndex]->counter + 1) % bpP->btbAssoc;
+         if( rowP[assocIndex]->counter == 0 )
+            replIndex              = assocIndex;
+      }
+   }
+
+   return replIndex;
+}
+
+
+bpPathT bpPredict( bpPT bpP, int indexBp, int indexBtb, int tag, boolean *update )
+{
+   *update            = TRUE;
+   if( bpP->btbPresent ){
+      // Btb is present
+      boolean hit     = FALSE;
+      tagPT *rowP     = bpP->tagStoreP[indexBtb]->rowP;
+      // Find the data
+      for( int assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex++ ){
+         if( rowP[assocIndex]->valid == 1 && rowP[assocIndex]->tag == tag ){
+            hit       = TRUE;
+            //printf("BTB HIT\n");
+            bpBtbHitUpdateLRU( bpP, indexBtb, assocIndex );
+            break;
+         }
+      }
+
+      // In case of hit, do as intended
+      // In case of miss, predict not taken and do a replacement
+      if( !hit ){
+         // Irrespective of replacement policy, check if there exists
+         // a block with valid bit unset
+         int success   = 0;
+         int assocIndex;
+         for( assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex++ ){
+            if( rowP[assocIndex]->valid == 0 ){
+               success = 1;
+               break;
+            }
+         }
+         assocIndex              = bpBtbFindReplacementUpdateCounterLRU( bpP, indexBtb, tag, assocIndex, success );
+         rowP[assocIndex]->tag   = tag;
+         rowP[assocIndex]->valid = 1;
+         *update                 = FALSE;
+         return BP_PATH_NOT_TAKEN;
+      }
+   } 
+
+   int predictionCounter    = bpP->predictionTable[indexBp];
 
    // If the counter value is greater than or equal to 2, predict taken, else not taken
    return ( predictionCounter >= 2 ) ? BP_PATH_TAKEN : BP_PATH_NOT_TAKEN;
@@ -100,12 +200,14 @@ inline bpPathT bpPredict( bpPT bpP, int index )
 void bpUpdatePredictionTable( bpPT bpP, int index, bpPathT actual )
 {
    int counter                 = bpP->predictionTable[index];
+   //printf("GSHARE index: %d old value: %d", index, counter);
    counter                    += ( actual == BP_PATH_TAKEN ) ? 1 : -1;
 
    // Saturate                
    counter                     = ( counter > 3 ) ? 3 : counter;
    counter                     = ( counter < 0 ) ? 0 : counter;
    
+   //printf(" new value %d\n", counter);
    bpP->predictionTable[index] = counter;
 }
 
@@ -127,17 +229,31 @@ void bpPrintPredictionTable( bpPT bpP )
    }
 }
 
+void bpBtbPrintContents( bpPT bpP )
+{
+   if( !bpP ) return;
+   for( int setIndex = 0; setIndex < bpP->btbSets; setIndex++ ){
+      printf("set\t\t%d:\t\t", setIndex);
+      tagPT *rowP = bpP->tagStoreP[setIndex]->rowP;
+      for( int assocIndex = 0; assocIndex < bpP->btbAssoc; assocIndex++ ){
+         printf("%x\t", rowP[assocIndex]->tag);
+      }
+      printf("\n");
+   }
+}
+
+
 //------------------- CONTROLLER FUNCS ---------------------
 bpControllerPT bpCreateController( bpPT bpBimodalP, bpPT bpGshareP, int k, bpTypeT type )
 {
-   bpControllerPT contP       = (bpControllerPT) calloc( sizeof(bpControllerT), 1 );
+   bpControllerPT contP       = (bpControllerPT) calloc( 1, sizeof(bpControllerT) );
    contP->type                = type;
    contP->bpBimodalP          = bpBimodalP;
    contP->bpGshareP           = bpGshareP;
 
    contP->kMask               = utilCreateMask( k, 0 );
    contP->sizeChooserTable    = ( k > 0 ) ? pow(2, k) : 0;
-   contP->chooserTable        = (int*) calloc( sizeof(int), contP->sizeChooserTable );
+   contP->chooserTable        = (int*) calloc( contP->sizeChooserTable, sizeof(int) );
 
    // Initialize all with 1
    for( int i = 0; i < contP->sizeChooserTable; i++ ){
@@ -153,22 +269,33 @@ void bpControllerProcess( bpControllerPT contP, int address, bpPathT actual )
 
    // Predict based on predictor
    if( type == BP_TYPE_BIMODAL ){
-      int index                = bpGetIndex( contP->bpBimodalP, address );
-      predicted                = bpPredict( contP->bpBimodalP, index );
-      bpUpdatePredictionTable( contP->bpBimodalP, index, actual );
+      int indexBp, indexBtb, tag;
+      boolean update;
+      bpGetIndexTag( contP->bpBimodalP, address, &indexBp, &indexBtb, &tag );
+      predicted                = bpPredict( contP->bpBimodalP, indexBp, indexBtb, tag, &update );
+      if( update )
+         bpUpdatePredictionTable( contP->bpBimodalP, indexBp, actual );
    } else if( type == BP_TYPE_GSHARE ){
-      int index                = bpGetIndex( contP->bpGshareP, address );
-      predicted                = bpPredict( contP->bpGshareP, index );
-      bpUpdatePredictionTable( contP->bpGshareP, index, actual );
-      bpUpdateGlobalBrHistoryTable( contP->bpGshareP, actual );
+      int indexBp, indexBtb, tag; 
+      boolean update;
+      bpGetIndexTag( contP->bpGshareP, address, &indexBp, &indexBtb, &tag );
+      predicted                = bpPredict( contP->bpGshareP, indexBp, indexBtb, tag, &update );
+      if( update ){
+         bpUpdatePredictionTable( contP->bpGshareP, indexBp, actual );
+         bpUpdateGlobalBrHistoryTable( contP->bpGshareP, actual );
+      }
    } else{
       // Hybrid
       // Get predictions from both models
-      int bimodalIndex         = bpGetIndex( contP->bpBimodalP, address );
-      bpPathT bimodalPred      = bpPredict( contP->bpBimodalP, bimodalIndex );
+      int bimodalIndexBp, bimodalIndexBtb, bimodalTag;
+      boolean updateBimodal;
+      bpGetIndexTag( contP->bpBimodalP, address, &bimodalIndexBp, &bimodalIndexBtb, &bimodalTag );
+      bpPathT bimodalPred      = bpPredict( contP->bpBimodalP, bimodalIndexBp, bimodalIndexBtb, bimodalTag, &updateBimodal );
 
-      int gshareIndex          = bpGetIndex( contP->bpGshareP, address );
-      bpPathT gsharePred       = bpPredict( contP->bpGshareP, gshareIndex );
+      int gshareIndexBp, gshareIndexBtb, gshareTag;
+      boolean updateGshare;
+      bpGetIndexTag( contP->bpGshareP, address, &gshareIndexBp, &gshareIndexBtb, &gshareTag );
+      bpPathT gsharePred       = bpPredict( contP->bpGshareP, gshareIndexBp, gshareIndexBtb, gshareTag, &updateGshare );
 
       // Do a lookup from chooser table
       int chooserIndex         = bpControllerGetChooserIndex( contP, address );
@@ -178,10 +305,12 @@ void bpControllerProcess( bpControllerPT contP, int address, bpPathT actual )
 
       if( selectedType == BP_TYPE_BIMODAL ){
          // Update bimodal
-         bpUpdatePredictionTable( contP->bpBimodalP, bimodalIndex, actual );
+         if( updateBimodal )
+            bpUpdatePredictionTable( contP->bpBimodalP, bimodalIndexBp, actual );
       } else{
          // Update Gshare
-         bpUpdatePredictionTable( contP->bpGshareP, gshareIndex, actual );
+         if( updateGshare )
+            bpUpdatePredictionTable( contP->bpGshareP, gshareIndexBp, actual );
       }
 
       // Global Br updates irrespective of decision

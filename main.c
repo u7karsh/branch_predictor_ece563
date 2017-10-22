@@ -42,6 +42,8 @@ void printStats( bpControllerPT contP )
    printf("number of predictions: %d\n", pred);
    printf("number of mispredictions: %d\n", misPred);
    printf("misprediction rate: %0.2f%%\n", misPredRate * 100.0);
+   printf("FINAL BTB CONTENTS\n");
+   bpBtbPrintContents( contP->bpGshareP );
    if( contP->type == BP_TYPE_HYBRID ){
       printf("FINAL CHOOSER CONTENTS\n");
       bpControllerPrintChooserTable( contP );
@@ -63,13 +65,15 @@ int main( int argc, char** argv )
    int mGshare             = atoi(argv[2]);
    int mBimodal            = atoi(argv[3]);
    int n                   = atoi(argv[4]);
-   sprintf( traceFile, "%s", argv[5] );
+   int assocGshare         = atoi(argv[5]);
+   int assocBimodal        = atoi(argv[6]);
+   sprintf( traceFile, "%s", argv[7] );
 
    FILE* fp                = fopen( traceFile, "r" ); 
    ASSERT(!fp, "Unable to read file: %s\n", traceFile);
-   bpPT bpBimodalP         = branchPredictorInit( "bimodal", mBimodal, n, BP_TYPE_BIMODAL );
-   bpPT bpGshareP          = branchPredictorInit( "gshare" , mGshare , n, BP_TYPE_GSHARE  );
-   bpControllerPT contP    = bpCreateController( bpBimodalP, bpGshareP, k, BP_TYPE_HYBRID );
+   bpPT bpBimodalP         = branchPredictorInit( "bimodal", mBimodal, n, BP_TYPE_BIMODAL, 2048, assocBimodal);
+   bpPT bpGshareP          = branchPredictorInit( "gshare" , mGshare , n, BP_TYPE_GSHARE, 2048, assocGshare);
+   bpControllerPT contP    = bpCreateController( bpBimodalP, bpGshareP, k, BP_TYPE_BIMODAL );
 
    doTrace( contP, fp );
    printStats( contP );
